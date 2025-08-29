@@ -1,1 +1,1 @@
-GitHub Pages bundle for Orario Primaria – V3
+GH Pages bundle V3.1 with jsDelivr CDNs and status fallback.
