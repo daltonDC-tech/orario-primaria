@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Orario Primaria – V2 (Import Excel Scuola)</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; background: #f6f7fb; color:#0f172a;}
+    header { background:#0f172a; color:#fff; padding:14px 18px; }
+    h1 { font-size:18px; margin:0; }
+    main { padding:16px; max-width:1200px; margin:0 auto; }
+    .card { background:#fff; border-radius:12px; box-shadow:0 1px 2px rgba(0,0,0,.06); padding:14px; margin-bottom:12px; }
+    .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    .btn { border:1px solid #0f172a; background:#0f172a; color:#fff; padding:8px 12px; border-radius:8px; cursor:pointer; }
+    .btn.secondary { background:#fff; color:#0f172a; }
+    .muted { color:#64748b; font-size:12px; }
+    input[type=file], input[type=text], select { padding:8px; border:1px solid #cbd5e1; border-radius:8px; }
+    table { border-collapse:separate; border-spacing:4px; width:100%; }
+    th, td { background:#f8fafc; padding:8px; border-radius:8px; font-size:12px; text-align:left; }
+    th { color:#475569; }
+    .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:11px; border:1px solid #e2e8f0; background:#eef2ff;}
+    .scroll-x { overflow-x:auto; }
+    .divider { height:1px; background:#e2e8f0; margin:8px 0; }
+    .badge { display:inline-block; padding:2px 6px; border-radius:6px; font-size:11px; border:1px solid #e2e8f0; background:#f1f5f9; }
+    .ok { color:#047857; }
+    .warn { color:#b45309; }
+  </style>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/xlsx/dist/xlsx.full.min.js"></script>
+</head>
+<body>
+<header><h1>Orario Primaria – V2</h1></header>
+<main>
+  <div class="card">
+    <div class="row">
+      <div>
+        <div class="muted">1) Carica il tuo Excel (anche il formato “TAB ORARIO.xlsx”)</div>
+        <input id="fileInput" type="file" accept=".xlsx,.xls" />
+      </div>
+      <button id="clearBtn" class="btn secondary">Svuota</button>
+    </div>
+    <div class="divider"></div>
+    <div class="muted">L'app riconosce intestazioni tipo <b>GIORNO</b>, <b>ORARIO</b> e una riga con i nomi delle <b>classi</b> (es. 1A, 1B, …).</div>
+  </div>
+
+  <div id="app"></div>
+</main>
+
+<script>
+const SUBJECTS = [
+  { key: "PREV", name: "Prevalente" },
+  { key: "DEU", name: "Tedesco" },
+  { key: "ENG", name: "Inglese" },
+  { key: "PE", name: "Ginnastica" },
+  { key: "REL", name: "Religione" },
+  { key: "ART", name: "Arte" },
+  { key: "MUS", name: "Musica" },
+];
+const DAYS = ["Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Lun","Mar","Mer","Gio","Ven"];
+
+let state = {
+  classes: [],
+  slots: [],
+  timetable: {}, // timetable[classId][dayIdx][slotIdx] = {subjKey}
+  teacherMap: {},
+};
+
+function makeEmptyTimetable(classes, slotCount){
+  const tt = {};
+  classes.forEach(c => tt[c.id] = Array.from({length:5}).map(()=>Array.from({length:slotCount}).map(()=>null)));
+  return tt;
+}
+
+function subjectKeyFromText(t){
+  if (!t) return null;
+  const s = t.toString().toLowerCase();
+  if (/inglese|eng/i.test(s)) return "ENG";
+  if (/tedesco|deu/i.test(s)) return "DEU";
+  if (/relig|irc/i.test(s)) return "REL";
+  if (/arte/i.test(s)) return "ART";
+  if (/music/i.test(s)) return "MUS";
+  if (/ginn|motori|educazione fisica|ef/i.test(s)) return "PE";
+  if (/intervallo|mensa|anticipo|uscita/i.test(s)) return null; // slot non didattici
+  return "PREV";
+}
+
+function normalizeDay(d){
+  if (!d) return null;
+  const s = d.toString().trim();
+  if (!s) return null;
+  const match = DAYS.find(x => x.toLowerCase().startsWith(s.toLowerCase().slice(0,3)));
+  return match || s;
+}
+
+function parseTabOrarioAoa(aoa){
+  // Trova riga header con GIORNO/ORARIO
+  let hdrRow = -1, colG = -1, colO = -1;
+  for (let r=0; r<Math.min(10, aoa.length); r++){
+    const row = aoa[r] || [];
+    for (let c=0; c<row.length; c++){
+      const v = (row[c]||"").toString().toLowerCase();
+      if (v === "giorno") colG = c;
+      if (v === "orario") colO = c;
+    }
+    if (colG !== -1 && colO !== -1){ hdrRow = r; break; }
+    colG = -1; colO = -1;
+  }
+  if (hdrRow === -1) return null;
+
+  // riga successiva: classi lungo le colonne a destra
+  const classRow = aoa[hdrRow+1] || [];
+  const classes = [];
+  for (let c=0; c<classRow.length; c++){
+    const val = classRow[c];
+    if (val && typeof val === "string" && /\b[1-5][A-Z]\b/i.test(val.trim())){
+      classes.push({ col: c, id: "C"+val.trim(), name: val.trim() });
+    }
+  }
+  if (classes.length === 0){
+    // fallback: prendi tutte le celle non vuote dopo colO
+    for (let c=colO+1; c<classRow.length; c++){
+      const val = classRow[c];
+      if (val) classes.push({ col: c, id: "C"+c, name: String(val) });
+    }
+  }
+
+  // slot list: tutte le etichette ORARIO non vuote (escludi intervallo/mensa)
+  const rows = aoa.slice(hdrRow+2);
+  const slotLabels = [];
+  const dayRows = []; // {day, time, rowIndex}
+  let currentDay = null;
+  for (let i=0; i<rows.length; i++){
+    const row = rows[i] || [];
+    const dval = normalizeDay(row[colG]);
+    if (dval) currentDay = dval;
+    const time = (row[colO]||"").toString();
+    if (time){
+      const isNonDid = /intervallo|mensa|anticipo|uscita/i.test(time);
+      if (!isNonDid && !slotLabels.includes(time)) slotLabels.push(time);
+      dayRows.push({day: currentDay, time, row: row});
+    }
+  }
+  // tieni solo 5 giorni canonici in ordine
+  const uniqDays = [];
+  for (const dr of dayRows){
+    if (!dr.day) continue;
+    const d = dr.day.slice(0,3);
+    if (!uniqDays.find(x=>x===d) && uniqDays.length<5) uniqDays.push(d);
+  }
+
+  // costruisci timetable: per ogni classe, per ogni giorno (0..4) e slot index su slotLabels
+  const tt = {};
+  classes.forEach(c => tt[c.id] = Array.from({length:5}).map(()=>Array.from({length:slotLabels.length}).map(()=>null)));
+  const dayIndex = (d3)=> uniqDays.indexOf((d3||"").slice(0,3));
+  for (const dr of dayRows){
+    const di = dayIndex(dr.day);
+    if (di < 0) continue;
+    const sIdx = slotLabels.indexOf(dr.time);
+    if (sIdx < 0) continue;
+    for (const cls of classes){
+      const cell = dr.row[cls.col];
+      if (!cell) continue;
+      const key = subjectKeyFromText(cell);
+      if (!key) continue;
+      tt[cls.id][di][sIdx] = { subjKey: key };
+    }
+  }
+
+  // class list + slots
+  return {
+    classes: classes.map(c => ({ id: c.id, name: c.name })),
+    slots: slotLabels,
+    timetable: tt
+  };
+}
+
+let stateInit = false;
+function initEmpty(){
+  state.classes = Array.from({length:10}).map((_,i)=>({id:"C"+(i+1), name:"Classe "+(i+1)}));
+  state.slots = ["8:00–9:00","9:00–10:00","10:00–11:00","11:00–12:00","13:30–14:30","14:30–15:30"];
+  state.timetable = makeEmptyTimetable(state.classes, state.slots.length);
+  state.teacherMap = {};
+}
+
+function handleFile(file){
+  const reader = new FileReader();
+  reader.onload = (e)=>{
+    const data = new Uint8Array(e.target.result);
+    const wb = XLSX.read(data, {type:'array'});
+    // prova parse “TAB ORARIO”
+    const sheetName = wb.SheetNames[0];
+    const aoa = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], {header:1});
+    const parsed = parseTabOrarioAoa(aoa);
+    if (parsed){
+      state.classes = parsed.classes;
+      state.slots = parsed.slots;
+      state.timetable = parsed.timetable;
+      state.teacherMap = {};
+      render();
+      alert("Import riuscito. Verifica classi/slot e completa i docenti.");
+      return;
+    }
+    alert("Formato non riconosciuto. Usa la tabella con colonne GIORNO/ORARIO e riga classi.");
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function setClassName(idx, name){ state.classes[idx].name = name; render(); }
+function setSlotLabel(idx, label){ state.slots[idx] = label; render(); }
+function setTeacher(cid, sk, v){ if (!state.teacherMap[cid]) state.teacherMap[cid] = {}; state.teacherMap[cid][sk] = v; }
+function setCell(cid, d, s, sk){ state.timetable[cid][d][s] = sk ? {subjKey: sk} : null; render(); }
+
+function exportPerClasse(){
+  const wb = XLSX.utils.book_new();
+  for (const cls of state.classes){
+    const rows = [["", ...state.slots]];
+    for (let d=0; d<5; d++){
+      const dayName = ["Lun","Mar","Mer","Gio","Ven"][d];
+      const row = [dayName];
+      for (let s=0; s<state.slots.length; s++){
+        const cell = state.timetable[cls.id]?.[d]?.[s];
+        row.push(cell ? SUBJECTS.find(x=>x.key===cell.subjKey)?.name || cell.subjKey : "");
+      }
+      rows.push(row);
+    }
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    XLSX.utils.book_append_sheet(wb, ws, cls.name.substring(0,28));
+  }
+  XLSX.writeFile(wb, "orario_per_classe.xlsx");
+}
+
+function exportPerDocente(){
+  const assignments = {};
+  for (const cls of state.classes){
+    const tmap = state.teacherMap[cls.id] || {};
+    for (let d=0; d<5; d++){
+      for (let s=0; s<state.slots.length; s++){
+        const cell = state.timetable[cls.id]?.[d]?.[s];
+        if (!cell) continue;
+        const subj = cell.subjKey;
+        const t = tmap[subj] || "(Docente non assegnato)";
+        if (!assignments[t]) assignments[t] = [];
+        assignments[t].push({classe: cls.name, giorno:["Lun","Mar","Mer","Gio","Ven"][d], slot: state.slots[s], materia: SUBJECTS.find(x=>x.key===subj)?.name || subj});
+      }
+    }
+  }
+  const wb = XLSX.utils.book_new();
+  for (const t of Object.keys(assignments)){
+    const rows = [["Classe","Giorno","Orario","Materia"]];
+    assignments[t].forEach(a => rows.push([a.classe, a.giorno, a.slot, a.materia]));
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    XLSX.utils.book_append_sheet(wb, ws, t.substring(0,28));
+  }
+  XLSX.writeFile(wb, "orario_per_docente.xlsx");
+}
+
+function App(){
+  React.useEffect(()=>{
+    const input = document.getElementById("fileInput");
+    const clearBtn = document.getElementById("clearBtn");
+    input.onchange = (e)=> e.target.files && handleFile(e.target.files[0]);
+    clearBtn.onclick = ()=>{ initEmpty(); render(); };
+    if (!stateInit){ initEmpty(); stateInit=true; render(); }
+  },[]);
+
+  return React.createElement("div",{}, [
+    React.createElement("div",{className:"card", key:"meta"},
+      React.createElement("div", {className:"muted"}, "Classi e slot (editabili):"),
+      React.createElement("div",{className:"row"},
+        React.createElement("div",{},
+          React.createElement("div",{className:"muted"},"Classi"),
+          React.createElement("div",{className:"row"},
+            state.classes.map((c,idx)=>
+              React.createElement("input",{key:c.id, type:"text", value:c.name, onChange:(e)=>setClassName(idx, e.target.value)})
+            )
+          )
+        ),
+        React.createElement("div",{},
+          React.createElement("div",{className:"muted"},"Etichette orari"),
+          React.createElement("div",{className:"row"},
+            state.slots.map((sl,i)=>
+              React.createElement("input",{key:i, type:"text", value:sl, onChange:(e)=>setSlotLabel(i, e.target.value)})
+            )
+          )
+        )
+      )
+    ),
+    React.createElement("div",{className:"card", key:"teachers"},
+      React.createElement("div",{className:"muted"},"Assegna docenti per classe/materia (per export per docente):"),
+      state.classes.map(c=> React.createElement("div",{key:c.id, className:"row"},
+        React.createElement("div",{className:"pill"}, c.name),
+        SUBJECTS.map(subj => React.createElement("div",{key:subj.key},
+          React.createElement("div",{className:"muted"}, subj.name),
+          React.createElement("input",{type:"text", placeholder:"Nome docente", value:(state.teacherMap[c.id]?.[subj.key]||""), onChange:(e)=>setTeacher(c.id, subj.key, e.target.value)})
+        ))
+      ))
+    ),
+    React.createElement("div",{className:"card", key:"tables"},
+      state.classes.map(c=> React.createElement("div",{key:c.id, className:"card"},
+        React.createElement("div",{className:"row"}, React.createElement("span",{className:"badge"}, c.name)),
+        React.createElement("div",{className:"scroll-x"},
+          React.createElement("table",{},[
+            React.createElement("thead",{key:"h"}, React.createElement("tr",{},[
+              React.createElement("th",{key:"g"},"Giorno"),
+              ...state.slots.map((sl,i)=>React.createElement("th",{key:i}, sl))
+            ])),
+            React.createElement("tbody",{key:"b"},
+              ["Lun","Mar","Mer","Gio","Ven"].map((dname,didx)=> React.createElement("tr",{key:dname},[
+                React.createElement("td",{key:"dn"}, dname),
+                ...state.slots.map((sl,sidx)=>{
+                  const current = state.timetable[c.id]?.[didx]?.[sidx]?.subjKey || "";
+                  return React.createElement("td",{key:sidx},
+                    React.createElement("select",{value:current, onChange:(e)=>setCell(c.id, didx, sidx, e.target.value||null)},
+                      [React.createElement("option",{key:"", value:""},"—")].concat(
+                        SUBJECTS.map(subj=> React.createElement("option",{key:subj.key, value:subj.key}, subj.name))
+                      )
+                    )
+                  );
+                })
+              ]))
+            )
+          ])
+        )
+      ))
+    ),
+    React.createElement("div",{className:"card", key:"export"},
+      React.createElement("div",{className:"row"},
+        React.createElement("button",{className:"btn", onClick:exportPerClasse},"Esporta Excel per classe"),
+        React.createElement("button",{className:"btn secondary", onClick:exportPerDocente},"Esporta Excel per docente")
+      )
+    )
+  ]);
+}
+
+function render(){
+  ReactDOM.createRoot(document.getElementById("app")).render(React.createElement(App));
+}
+render();
+</script>
+</body>
+</html>
